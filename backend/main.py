@@ -108,31 +108,31 @@ def get_insights():
     # TODO: AI INSIGHTS — plug in your OpenAI call here
     # -------------------------------------------------------------------------
     #
-    # import json
-    # from openai import OpenAI
+    import json
+    from openai import OpenAI
     #
-    # client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
     #
     # Step 1 — Fetch all processed receipt data from your database
-    # receipts = db.get_all_receipts()
+    receipts = db.get_all_receipts()
     #
     # Step 2 — Ask GPT to analyse spending patterns across all receipts
-    # response = client.chat.completions.create(
-    #     model="gpt-4o",
-    #     messages=[
-    #         {
-    #             "role": "system",
-    #             "content": "You are a personal finance advisor. Analyse the user's spending data and provide clear, actionable insights.",
-    #         },
-    #         {
-    #             "role": "user",
-    #             "content": f"Here is my spending data: {json.dumps(receipts)}. Please provide: 1) a spending summary, 2) top spending categories, 3) three specific saving tips.",
-    #         },
-    #     ],
-    # )
+    response = client.chat.completions.create(
+        model="gpt-4o",
+        messages=[
+             {
+                 "role": "system",
+                "content": "You are a personal finance advisor. Analyse the user's spending data and provide clear, actionable insights.",
+            },
+            {
+                "role": "user",
+               "content": f"Here is my spending data: {json.dumps(receipts)}. Please provide: 1) a spending summary, 2) top spending categories, 3) three specific saving tips.",
+            },
+        ],
+    )
     #
     # Step 3 — Return the insights to the frontend
-    # return {"insights": response.choices[0].message.content}
+    return {"insights": response.choices[0].message.content}
     #
     # -------------------------------------------------------------------------
 
