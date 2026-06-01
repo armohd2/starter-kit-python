@@ -3,146 +3,224 @@ import json
 import os
 import shutil
 import time
-from http import client
 from pathlib import Path
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from dotenv import load_dotenv
+from openai import OpenAI
 
 load_dotenv()
 
-app = FastAPI(title="Receipts to Riches API")
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+app = FastAPI(title="ReceiptIQ API")
 
 UPLOADS_DIR = Path("uploads")
 UPLOADS_DIR.mkdir(exist_ok=True)
 
-ALLOWED_TYPES = {"image/jpeg", "image/png", "image/webp", "application/pdf"}
+DB_FILE = Path("receipts.json")
+ALLOWED_TYPES = {"image/jpeg", "image/png", "image/webp"}
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
-# ---------------------------------------------------------------------------
-# POST /receipts
-# Accepts a file upload and saves it to the /uploads directory.
-# ---------------------------------------------------------------------------
+def read_db():
+    if DB_FILE.exists():
+        return json.loads(DB_FILE.read_text())
+    return []
+
+
+def write_db(data):
+    DB_FILE.write_text(json.dumps(data, indent=2))
+
+
+def file_to_base64(path):
+    with open(path, "rb") as file:
+        return base64.b64encode(file.read()).decode("utf-8")
+
+
+@app.get("/")
+def home():
+    return {"message": "ReceiptIQ backend is running"}
+
+
 @app.post("/receipts", status_code=201)
 async def upload_receipt(receipt: UploadFile = File(...)):
     if receipt.content_type not in ALLOWED_TYPES:
         raise HTTPException(
             status_code=400,
-            detail="Invalid file type. Only JPG, PNG, WebP and PDF are accepted.",
+            detail="Only JPG, PNG, and WebP receipt images are supported for AI extraction."
         )
 
     filename = f"{int(time.time() * 1000)}-{receipt.filename}"
-    dest = UPLOADS_DIR / filename
+    file_path = UPLOADS_DIR / filename
 
-    with dest.open("wb") as f:
-        shutil.copyfileobj(receipt.file, f)
+    with file_path.open("wb") as buffer:
+        shutil.copyfileobj(receipt.file, buffer)
 
-    # -------------------------------------------------------------------------
-    # TODO: AI EXTRACTION — plug in your OpenAI call here
-    # -------------------------------------------------------------------------
-    # Step 1 — Read the saved file as base64
-    with open(dest, "rb") as f:
-        image_base64 = base64.b64encode(f.read()).decode()
+    image_base64 = file_to_base64(file_path)
 
-        # Step 2 — Send to GPT-4o Vision and ask it to extract receipt fields
+    prompt = """
+    Extract receipt data from this image.
+
+    Return ONLY valid JSON in this exact structure:
+    {
+      "store_name": "",
+      "date": "",
+      "currency": "GBP",
+      "total_amount": 0,
+      "category": "",
+      "items": [
+        {
+          "name": "",
+          "price": 0,
+          "quantity": 1,
+          "health_category": "healthy | moderate | unhealthy | non_food"
+        }
+      ],
+      "summary": "",
+      "saving_tip": ""
+    }
+    """
+
     response = client.chat.completions.create(
-        model="gpt-4o",
-        messages=[{
-            "role": "user",
-            "content": [
-                {
-                    "type": "text",
-                    "text": "Extract the following from this receipt and return as JSON: store_name, date, items (list of {name, price}), total_amount, category (e.g. groceries, dining, transport).",
-                },
-                {
-                    "type": "image_url",
-                    "image_url": {"url": f"data:{receipt.content_type};base64,{image_base64}"},
-                },
-            ],
-        }],
-    )
-
-    # Step 3 — Parse the extracted JSON from the model response
-    receipt_data = json.loads(response.choices[0].message.content)
-
-    # Step 4 — Save to your database (design your own schema!)
-    records_path = Path("receipts.json")
-    records = json.loads(records_path.read_text()) if records_path.exists() else []
-    records.append({"filename": filename, **receipt_data})
-    records_path.write_text(json.dumps(records, indent=2))
-
-    # -------------------------------------------------------------------------
-
-    return {"message": "Receipt uploaded successfully.", "filename": filename}
-
-# ---------------------------------------------------------------------------
-# GET /receipts
-# Returns a list of files currently in /uploads.
-# Once you have a database, replace this with a DB query.
-# ---------------------------------------------------------------------------
-@app.get("/receipts")
-def list_receipts():
-    files = [
-        {"filename": f.name, "uploaded_at": f.stat().st_mtime}
-        for f in UPLOADS_DIR.iterdir()
-        if f.is_file()
-    ]
-    return files
-
-
-# ---------------------------------------------------------------------------
-# GET /insights
-# Returns AI-generated spending insights.
-# ---------------------------------------------------------------------------
-@app.get("/insights")
-def get_insights():
-    # -------------------------------------------------------------------------
-    # TODO: AI INSIGHTS — plug in your OpenAI call here
-    # -------------------------------------------------------------------------
-    #
-    import json
-    from openai import OpenAI
-    #
-    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-    #
-    # Step 1 — Fetch all processed receipt data from your database
-    receipts = db.get_all_receipts()
-    #
-    # Step 2 — Ask GPT to analyse spending patterns across all receipts
-    response = client.chat.completions.create(
-        model="gpt-4o",
+        model="gpt-4o-mini",
+        response_format={"type": "json_object"},
         messages=[
-             {
-                 "role": "system",
-                "content": "You are a personal finance advisor. Analyse the user's spending data and provide clear, actionable insights.",
+            {
+                "role": "system",
+                "content": "You are an AI receipt extraction assistant. Return only clean JSON."
             },
             {
                 "role": "user",
-               "content": f"Here is my spending data: {json.dumps(receipts)}. Please provide: 1) a spending summary, 2) top spending categories, 3) three specific saving tips.",
-            },
-        ],
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:{receipt.content_type};base64,{image_base64}"
+                        }
+                    }
+                ]
+            }
+        ]
     )
-    #
-    # Step 3 — Return the insights to the frontend
-    return {"insights": response.choices[0].message.content}
-    #
-    # -------------------------------------------------------------------------
+
+    extracted_data = json.loads(response.choices[0].message.content)
+
+    record = {
+        "id": int(time.time() * 1000),
+        "filename": filename,
+        "uploaded_at": time.time(),
+        **extracted_data
+    }
+
+    receipts = read_db()
+    receipts.append(record)
+    write_db(receipts)
+    print(record)
 
     return {
-        "message": "Insights endpoint placeholder — implement AI analysis here!",
-        "insights": None,
+        "message": "Receipt uploaded and analysed successfully.",
+        "receipt": record
     }
+
+
+@app.get("/receipts")
+def get_receipts():
+    return read_db()
+
+
+@app.get("/summary")
+def get_summary():
+    receipts = read_db()
+
+    total_spent = sum(float(r.get("total_amount", 0)) for r in receipts)
+
+    categories = {}
+    stores = {}
+
+    for receipt in receipts:
+        category = receipt.get("category", "Other")
+        store = receipt.get("store_name", "Unknown")
+
+        categories[category] = categories.get(category, 0) + float(receipt.get("total_amount", 0))
+        stores[store] = stores.get(store, 0) + float(receipt.get("total_amount", 0))
+
+    return {
+        "total_spent": round(total_spent, 2),
+        "receipt_count": len(receipts),
+        "categories": categories,
+        "stores": stores
+    }
+
+
+@app.get("/insights")
+def get_insights():
+    receipts = read_db()
+
+    if not receipts:
+        return {
+            "summary": "Upload your first receipt to unlock personalised insights.",
+            "insights": []
+        }
+
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        response_format={"type": "json_object"},
+        messages=[
+            {
+                "role": "system",
+                "content": "You are an encouraging AI financial coach. Be short, helpful, and user-friendly."
+            },
+            {
+                "role": "user",
+                "content": f"""
+                Analyse these receipts and return JSON:
+                {json.dumps(receipts)}
+
+                Return:
+                {{
+                  "financial_twin": "",
+                  "summary": "",
+                  "insights": [
+                    {{"title": "", "message": "", "type": "saving | warning | positive"}}
+                  ],
+                  "budget_prediction": "",
+                  "health_summary": "",
+                  "saving_opportunity": ""
+                }}
+                """
+            }
+        ]
+    )
+
+    return json.loads(response.choices[0].message.content)
+
+
+@app.get("/bills")
+def get_bills():
+    return [
+        {"name": "Car insurance", "amount": 89.00, "category": "Insurance"},
+        {"name": "Gym membership", "amount": 24.99, "category": "Gym"},
+        {"name": "Phone bill", "amount": 35.00, "category": "Phone"},
+        {"name": "Netflix", "amount": 10.99, "category": "Subscription"},
+        {"name": "Spotify Student", "amount": 5.99, "category": "Subscription"}
+    ]
 
 
 if __name__ == "__main__":
     import uvicorn
-
-    uvicorn.run("main:app", host="0.0.0.0", port=int(os.getenv("PORT", 8000)), reload=True)
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=int(os.getenv("PORT", 8000)),
+        reload=True
+    )
